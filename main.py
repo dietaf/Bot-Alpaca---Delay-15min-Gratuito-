@@ -333,19 +333,24 @@ class AlpacaTradingBotDelayed:
         order = self.place_order(self.symbol, qty, side)
         
         if order:
+            if signal == 1:
+                stop_loss = price - (atr * self.trailing_stop_mult)
+                take_profit = price + (atr * self.take_profit_mult)
+            else:
+                stop_loss = price + (atr * self.trailing_stop_mult)
+                take_profit = price - (atr * self.take_profit_mult)
+            
             self.current_position = {
                 'type': 'LONG' if signal == 1 else 'SHORT',
                 'entry_price': price,
                 'qty': qty,
-                'entry_time': datetime.now()
+                'entry_time': datetime.now(),
+                'stop_loss': stop_loss,
+                'take_profit': take_profit
             }
             
-            if signal == 1:
-                self.stop_loss = price - (atr * self.trailing_stop_mult)
-                self.take_profit = price + (atr * self.take_profit_mult)
-            else:
-                self.stop_loss = price + (atr * self.trailing_stop_mult)
-                self.take_profit = price - (atr * self.take_profit_mult)
+            self.stop_loss = stop_loss
+            self.take_profit = take_profit
             
             self.log(f"🎯 {self.current_position['type']} @ ${price:.2f}", "success")
             self.log(f"   SL: ${self.stop_loss:.2f} | TP: ${self.take_profit:.2f}", "info")
