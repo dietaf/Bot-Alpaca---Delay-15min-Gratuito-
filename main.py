@@ -639,17 +639,22 @@ def main():
     # Inicializar bot con Auto-Resume
     if 'bot' not in st.session_state:
         try:
+            # Intentar cargar desde secrets
             api_key = st.secrets["alpaca"]["api_key"]
             api_secret = st.secrets["alpaca"]["api_secret"]
             st.session_state.bot = AlpacaBotPro(api_key, api_secret, paper=True)
+            st.session_state.api_configured = True
             
             # Intentar auto-resume
             if st.session_state.bot.load_and_resume():
                 st.success("🔄 Bot reanudado automáticamente!")
                 time.sleep(2)
                 st.rerun()
-        except:
+        except Exception as e:
+            # Si no hay secrets, inicializar sin bot
             st.session_state.bot = None
+            st.session_state.api_configured = False
+            st.session_state.error_msg = str(e)
     
     bot = st.session_state.bot
     
