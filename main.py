@@ -1,7 +1,7 @@
 # ===================================================================
-# BOT DE TRADING AUTOMATIZADO - ALPACA (DELAY 15 MIN)
-# Version: Datos Gratuitos - Sin suscripción requerida
-# Max Way Strategies con datos retrasados 15 minutos
+# BOT DE TRADING ALPACA PROFESIONAL CON ML + SQLITE
+# Auto-Resume, Machine Learning, Database Persistente
+# Version: Delay 15min - Datos Gratuitos
 # ===================================================================
 
 import streamlit as st
@@ -14,39 +14,221 @@ import time
 import threading
 from collections import deque
 import yfinance as yf
+import sqlite3
 
-# Importar Alpaca
+# Alpaca
 try:
     from alpaca.trading.client import TradingClient
     from alpaca.trading.requests import MarketOrderRequest
     from alpaca.trading.enums import OrderSide, TimeInForce
 except:
-    st.error("Instalando Alpaca API...")
+    st.error("⚠️ Instalando Alpaca API...")
 
 # ===================================================================
 # CONFIGURACIÓN
 # ===================================================================
 
 st.set_page_config(
-    page_title="Alpaca Bot - Delay 15min",
-    page_icon="⏱️",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Alpaca Bot PRO - ML",
+    page_icon="🚀",
+    layout="wide"
 )
 
 # ===================================================================
-# CLASE DEL BOT CON DATOS GRATUITOS
+# CLASE DE BASE DE DATOS
 # ===================================================================
 
-class AlpacaTradingBotDelayed:
+class AlpacaDatabase:
+    def __init__(self, db_path='alpaca_trading.db'):
+        self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        """Inicializa la base de datos"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Tabla de trades
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME,
+            symbol TEXT,
+            strategy TEXT,
+            timeframe TEXT,
+            entry_price REAL,
+            exit_price REAL,
+            qty INTEGER,
+            stop_loss REAL,
+            take_profit REAL,
+            profit_usd REAL,
+            profit_pct REAL,
+            win INTEGER,
+            exit_reason TEXT,
+            duration_minutes INTEGER,
+            atr REAL
+        )
+        ''')
+        
+        # Tabla de estado del bot (Auto-Resume)
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS bot_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            is_running INTEGER,
+            symbol TEXT,
+            strategy TEXT,
+            timeframe TEXT,
+            risk_per_trade REAL,
+            trailing_stop_mult REAL,
+            take_profit_mult REAL,
+            last_updated DATETIME
+        )
+        ''')
+        
+        conn.commit()
+        conn.close()
+    
+    def save_trade(self, trade_data):
+        """Guarda un trade"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO trades (
+            timestamp, symbol, strategy, timeframe, entry_price, exit_price,
+            qty, stop_loss, take_profit, profit_usd, profit_pct, win,
+            exit_reason, duration_minutes, atr
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            trade_data['timestamp'],
+            trade_data['symbol'],
+            trade_data['strategy'],
+            trade_data['timeframe'],
+            trade_data['entry_price'],
+            trade_data['exit_price'],
+            trade_data['qty'],
+            trade_data['stop_loss'],
+            trade_data['take_profit'],
+            trade_data['profit_usd'],
+            trade_data['profit_pct'],
+            trade_data['win'],
+            trade_data['exit_reason'],
+            trade_data['duration_minutes'],
+            trade_data['atr']
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_all_trades(self, limit=None):
+        """Obtiene todos los trades"""
+        conn = sqlite3.connect(self.db_path)
+        query = "SELECT * FROM trades ORDER BY timestamp DESC"
+        if limit:
+            query += f" LIMIT {limit}"
+        df = pd.read_sql_query(query, conn)
+        conn.close()
+        return df
+    
+    def get_stats(self):
+        """Obtiene estadísticas generales"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT 
+            COUNT(*) as total_trades,
+            SUM(CASE WHEN win = 1 THEN 1 ELSE 0 END) as wins,
+            SUM(profit_usd) as total_profit,
+            AVG(profit_usd) as avg_profit,
+            MAX(profit_usd) as max_profit,
+            MIN(profit_usd) as min_profit
+        FROM trades
+        ''')
+        
+        stats = cursor.fetchone()
+        conn.close()
+        
+        if stats[0] > 0:
+            return {
+                'total_trades': stats[0],
+                'wins': stats[1],
+                'win_rate': (stats[1] / stats[0]) * 100,
+                'total_profit': stats[2],
+                'avg_profit': stats[3],
+                'max_profit': stats[4],
+                'min_profit': stats[5]
+            }
+        return None
+    
+    def save_bot_state(self, bot_config):
+        """Guarda el estado del bot para Auto-Resume"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT OR REPLACE INTO bot_state (
+            id, is_running, symbol, strategy, timeframe,
+            risk_per_trade, trailing_stop_mult, take_profit_mult, last_updated
+        ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            1 if bot_config['is_running'] else 0,
+            bot_config['symbol'],
+            bot_config['strategy'],
+            bot_config['timeframe'],
+            bot_config['risk_per_trade'],
+            bot_config['trailing_stop_mult'],
+            bot_config['take_profit_mult'],
+            datetime.now()
+        ))
+        
+        conn.commit()
+        conn.close()
+    
+    def load_bot_state(self):
+        """Carga el estado guardado del bot"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('SELECT * FROM bot_state WHERE id = 1')
+        row = cursor.fetchone()
+        conn.close()
+        
+        if row:
+            return {
+                'is_running': bool(row[1]),
+                'symbol': row[2],
+                'strategy': row[3],
+                'timeframe': row[4],
+                'risk_per_trade': row[5],
+                'trailing_stop_mult': row[6],
+                'take_profit_mult': row[7],
+                'last_updated': row[8]
+            }
+        return None
+    
+    def clear_bot_state(self):
+        """Limpia el estado del bot"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('UPDATE bot_state SET is_running = 0 WHERE id = 1')
+        conn.commit()
+        conn.close()
+
+# ===================================================================
+# BOT ALPACA PROFESIONAL
+# ===================================================================
+
+class AlpacaBotPro:
     def __init__(self, api_key, api_secret, paper=True):
         self.api_key = api_key
         self.api_secret = api_secret
         self.paper = paper
         self.trading_client = None
+        self.db = AlpacaDatabase()
+        
         self.is_running = False
         self.current_position = None
-        self.trades_history = []
         self.equity_history = deque(maxlen=1000)
         self.logs = deque(maxlen=100)
         
@@ -54,22 +236,16 @@ class AlpacaTradingBotDelayed:
         self.symbol = "SPY"
         self.timeframe = "15Min"
         self.strategy = "ORB"
-        self.capital = 10000
         self.risk_per_trade = 0.02
         self.trailing_stop_mult = 2.0
         self.take_profit_mult = 3.0
-        
-        # Estado
-        self.entry_price = 0
-        self.stop_loss = 0
-        self.take_profit = 0
-        self.position_size = 0
         
         if api_key and api_secret:
             try:
                 self.trading_client = TradingClient(api_key, api_secret, paper=paper)
                 self.log("✅ Conectado a Alpaca", "success")
-                self.log("⏱️ Usando datos GRATUITOS (delay 15min)", "warning")
+                self.log("💾 Base de datos conectada", "info")
+                self.log("⏱️ Datos gratuitos (delay 15min)", "warning")
             except Exception as e:
                 self.log(f"❌ Error: {str(e)}", "error")
     
@@ -97,138 +273,88 @@ class AlpacaTradingBotDelayed:
             return None
     
     def get_yf_interval(self, timeframe):
-        """Convierte timeframe a intervalo de yfinance"""
+        """Convierte timeframe"""
         mapping = {
-            "1Min": "1m",
-            "5Min": "5m",
-            "15Min": "15m",
-            "1Hour": "1h",
-            "4Hour": "1h",  # yfinance no tiene 4h, usamos 1h
-            "1Day": "1d"
+            "1Min": "1m", "5Min": "5m", "15Min": "15m",
+            "1Hour": "1h", "4Hour": "1h", "1Day": "1d"
         }
         return mapping.get(timeframe, "15m")
     
     def get_historical_data(self, symbol, timeframe='15Min', limit=100):
-        """Obtiene datos de Yahoo Finance (GRATIS)"""
+        """Obtiene datos de Yahoo Finance"""
         try:
-            # Yahoo Finance usa días como periodo
-            if "Min" in timeframe or "Hour" in timeframe:
-                period = "7d"  # Última semana para intradía
-            else:
-                period = "1mo"  # Último mes para daily
-            
+            period = "7d" if "Min" in timeframe or "Hour" in timeframe else "1mo"
             interval = self.get_yf_interval(timeframe)
             
-            # Descargar datos
             ticker = yf.Ticker(symbol)
             df = ticker.history(period=period, interval=interval)
             
             if df.empty:
-                self.log(f"⚠️ No hay datos para {symbol}", "warning")
                 return None
             
-            # Renombrar columnas para compatibilidad
             df = df.rename(columns={
-                'Open': 'open',
-                'High': 'high',
-                'Low': 'low',
-                'Close': 'close',
-                'Volume': 'volume'
+                'Open': 'open', 'High': 'high',
+                'Low': 'low', 'Close': 'close', 'Volume': 'volume'
             })
             
-            # Tomar últimas N barras
-            df = df.tail(limit)
-            
-            self.log(f"📊 Datos obtenidos: {len(df)} barras", "info")
-            return df
+            return df.tail(limit)
             
         except Exception as e:
-            self.log(f"Error obteniendo datos: {str(e)}", "error")
+            self.log(f"Error datos: {str(e)}", "error")
             return None
     
     def get_current_price(self, symbol):
-        """Obtiene precio actual de Yahoo Finance"""
+        """Precio actual"""
         try:
             ticker = yf.Ticker(symbol)
             data = ticker.history(period="1d", interval="1m")
             if not data.empty:
                 return float(data['Close'].iloc[-1])
-            return None
-        except Exception as e:
-            self.log(f"Error precio: {str(e)}", "error")
-            return None
+        except:
+            pass
+        return None
     
     def calculate_atr(self, df, period=14):
         """Calcula ATR"""
         if len(df) < period:
             return 0
         
-        high = df['high']
-        low = df['low']
-        close = df['close']
+        high, low, close = df['high'], df['low'], df['close']
+        tr = pd.concat([
+            high - low,
+            abs(high - close.shift()),
+            abs(low - close.shift())
+        ], axis=1).max(axis=1)
         
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
-        
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
-        
         return atr.iloc[-1] if len(atr) > 0 else 0
     
-    # ===============================================================
     # ESTRATEGIAS
-    # ===============================================================
-    
     def check_orb_signal(self, df):
         """ORB Strategy"""
         if len(df) < 2:
             return 0
+        orb_high, orb_low = df['high'].iloc[0], df['low'].iloc[0]
+        current, prev = df['close'].iloc[-1], df['close'].iloc[-2]
         
-        orb_high = df['high'].iloc[0]
-        orb_low = df['low'].iloc[0]
-        current_price = df['close'].iloc[-1]
-        prev_price = df['close'].iloc[-2]
-        
-        if prev_price <= orb_high and current_price > orb_high:
+        if prev <= orb_high and current > orb_high:
             return 1
-        elif prev_price >= orb_low and current_price < orb_low:
+        elif prev >= orb_low and current < orb_low:
             return -1
-        
         return 0
     
-    def check_pivot_signal(self, df, window=20):
-        """Pivot Hunter"""
-        if len(df) < window * 2:
+    def check_trendshift_signal(self, df, fast=9, slow=21):
+        """TrendShift"""
+        if len(df) < slow + 5:
             return 0
         
-        pivot_high = df['high'].iloc[-window*2:-window].max()
-        pivot_low = df['low'].iloc[-window*2:-window].min()
-        current_price = df['close'].iloc[-1]
-        prev_price = df['close'].iloc[-2]
+        ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
+        ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
         
-        if prev_price <= pivot_high and current_price > pivot_high:
+        if ema_fast.iloc[-2] <= ema_slow.iloc[-2] and ema_fast.iloc[-1] > ema_slow.iloc[-1]:
             return 1
-        elif prev_price >= pivot_low and current_price < pivot_low:
+        elif ema_fast.iloc[-2] >= ema_slow.iloc[-2] and ema_fast.iloc[-1] < ema_slow.iloc[-1]:
             return -1
-        
-        return 0
-    
-    def check_gap_signal(self, df, threshold=0.5):
-        """Gap Trading"""
-        if len(df) < 2:
-            return 0
-        
-        prev_close = df['close'].iloc[-2]
-        current_open = df['open'].iloc[-1]
-        
-        gap_pct = ((current_open - prev_close) / prev_close) * 100
-        
-        if gap_pct > threshold:
-            return 1
-        elif gap_pct < -threshold:
-            return -1
-        
         return 0
     
     def check_quantum_signal(self, df, rsi_period=14):
@@ -244,51 +370,26 @@ class AlpacaTradingBotDelayed:
         
         vol_ma = df['volume'].rolling(window=20).mean()
         vol_ratio = df['volume'].iloc[-1] / vol_ma.iloc[-1]
-        
         current_rsi = rsi.iloc[-1]
         
         if current_rsi < 30 and vol_ratio > 1.5:
             return 1
         elif current_rsi > 70 and vol_ratio > 1.5:
             return -1
-        
-        return 0
-    
-    def check_trendshift_signal(self, df, fast=9, slow=21):
-        """TrendShift"""
-        if len(df) < slow + 5:
-            return 0
-        
-        ema_fast = df['close'].ewm(span=fast, adjust=False).mean()
-        ema_slow = df['close'].ewm(span=slow, adjust=False).mean()
-        
-        if ema_fast.iloc[-2] <= ema_slow.iloc[-2] and ema_fast.iloc[-1] > ema_slow.iloc[-1]:
-            return 1
-        elif ema_fast.iloc[-2] >= ema_slow.iloc[-2] and ema_fast.iloc[-1] < ema_slow.iloc[-1]:
-            return -1
-        
         return 0
     
     def get_signal(self, df):
         """Obtiene señal según estrategia"""
         if self.strategy == "ORB":
             return self.check_orb_signal(df)
-        elif self.strategy == "Pivot Hunter":
-            return self.check_pivot_signal(df)
-        elif self.strategy == "Gap Trading":
-            return self.check_gap_signal(df)
-        elif self.strategy == "Quantum Shift":
-            return self.check_quantum_signal(df)
         elif self.strategy == "TrendShift":
             return self.check_trendshift_signal(df)
+        elif self.strategy == "Quantum Shift":
+            return self.check_quantum_signal(df)
         return 0
     
-    # ===============================================================
-    # EJECUCIÓN DE TRADES
-    # ===============================================================
-    
     def calculate_position_size(self, price, atr):
-        """Calcula tamaño de posición"""
+        """Position sizing inteligente"""
         account = self.get_account_info()
         if not account:
             return 0
@@ -302,7 +403,7 @@ class AlpacaTradingBotDelayed:
         shares = int(risk_amount / stop_distance)
         max_shares = int(account['equity'] * 0.1 / price)
         
-        return min(shares, max_shares, 1)
+        return max(1, min(shares, max_shares))
     
     def place_order(self, symbol, qty, side):
         """Coloca orden"""
@@ -346,65 +447,58 @@ class AlpacaTradingBotDelayed:
                 'qty': qty,
                 'entry_time': datetime.now(),
                 'stop_loss': stop_loss,
-                'take_profit': take_profit
+                'take_profit': take_profit,
+                'atr': atr
             }
             
-            self.stop_loss = stop_loss
-            self.take_profit = take_profit
-            
             self.log(f"🎯 {self.current_position['type']} @ ${price:.2f}", "success")
-            self.log(f"   SL: ${self.stop_loss:.2f} | TP: ${self.take_profit:.2f}", "info")
-    
-    def update_trailing_stop(self, current_price, atr):
-        """Actualiza trailing stop"""
-        if not self.current_position:
-            return
-        
-        if self.current_position['type'] == 'LONG':
-            new_stop = current_price - (atr * self.trailing_stop_mult)
-            if new_stop > self.stop_loss:
-                self.stop_loss = new_stop
-                self.log(f"📈 Trailing stop: ${self.stop_loss:.2f}", "info")
-        else:
-            new_stop = current_price + (atr * self.trailing_stop_mult)
-            if new_stop < self.stop_loss:
-                self.stop_loss = new_stop
-                self.log(f"📉 Trailing stop: ${self.stop_loss:.2f}", "info")
+            self.log(f"   SL: ${stop_loss:.2f} | TP: ${take_profit:.2f}", "info")
     
     def close_position(self, reason, current_price):
-        """Cierra posición"""
+        """Cierra posición y guarda en DB"""
         if not self.current_position:
             return
         
-        side = "sell" if self.current_position['type'] == 'LONG' else "buy"
-        qty = self.current_position['qty']
+        pos = self.current_position
+        side = "sell" if pos['type'] == 'LONG' else "buy"
         
-        order = self.place_order(self.symbol, qty, side)
+        order = self.place_order(self.symbol, pos['qty'], side)
         
         if order:
-            if self.current_position['type'] == 'LONG':
-                profit = current_price - self.current_position['entry_price']
+            if pos['type'] == 'LONG':
+                profit = current_price - pos['entry_price']
             else:
-                profit = self.current_position['entry_price'] - current_price
+                profit = pos['entry_price'] - current_price
             
-            profit_pct = (profit / self.current_position['entry_price']) * 100
-            profit_usd = profit * qty
+            profit_pct = (profit / pos['entry_price']) * 100
+            profit_usd = profit * pos['qty']
+            duration = (datetime.now() - pos['entry_time']).total_seconds() / 60
             
-            self.trades_history.append({
-                'entry_time': self.current_position['entry_time'],
-                'exit_time': datetime.now(),
-                'type': self.current_position['type'],
-                'entry_price': self.current_position['entry_price'],
+            # Guardar en DB
+            trade_data = {
+                'timestamp': datetime.now(),
+                'symbol': self.symbol,
+                'strategy': self.strategy,
+                'timeframe': self.timeframe,
+                'entry_price': pos['entry_price'],
                 'exit_price': current_price,
-                'qty': qty,
-                'profit': profit_usd,
+                'qty': pos['qty'],
+                'stop_loss': pos['stop_loss'],
+                'take_profit': pos['take_profit'],
+                'profit_usd': profit_usd,
                 'profit_pct': profit_pct,
-                'reason': reason
-            })
+                'win': 1 if profit_usd > 0 else 0,
+                'exit_reason': reason,
+                'duration_minutes': int(duration),
+                'atr': pos['atr']
+            }
+            
+            self.db.save_trade(trade_data)
             
             emoji = "💰" if profit_usd > 0 else "💸"
             self.log(f"{emoji} Cerrado: {reason}", "success" if profit_usd > 0 else "error")
             self.log(f"   P/L: ${profit_usd:.2f} ({profit_pct:+.2f}%)", "info")
+            self.log("💾 Trade guardado en DB", "info")
             
             self.current_position = None
     
@@ -413,31 +507,62 @@ class AlpacaTradingBotDelayed:
         if not self.current_position:
             return
         
-        if self.current_position['type'] == 'LONG':
-            if current_price <= self.stop_loss:
+        pos = self.current_position
+        
+        if pos['type'] == 'LONG':
+            if current_price <= pos['stop_loss']:
                 self.close_position("Stop Loss", current_price)
-            elif current_price >= self.take_profit:
+            elif current_price >= pos['take_profit']:
                 self.close_position("Take Profit", current_price)
         else:
-            if current_price >= self.stop_loss:
+            if current_price >= pos['stop_loss']:
                 self.close_position("Stop Loss", current_price)
-            elif current_price <= self.take_profit:
+            elif current_price <= pos['take_profit']:
                 self.close_position("Take Profit", current_price)
     
-    # ===============================================================
-    # LOOP PRINCIPAL
-    # ===============================================================
+    def save_state(self):
+        """Guarda estado actual"""
+        config = {
+            'is_running': self.is_running,
+            'symbol': self.symbol,
+            'strategy': self.strategy,
+            'timeframe': self.timeframe,
+            'risk_per_trade': self.risk_per_trade,
+            'trailing_stop_mult': self.trailing_stop_mult,
+            'take_profit_mult': self.take_profit_mult
+        }
+        self.db.save_bot_state(config)
+    
+    def load_and_resume(self):
+        """Carga y resume automáticamente"""
+        saved_state = self.db.load_bot_state()
+        
+        if saved_state and saved_state['is_running']:
+            self.symbol = saved_state['symbol']
+            self.strategy = saved_state['strategy']
+            self.timeframe = saved_state['timeframe']
+            self.risk_per_trade = saved_state['risk_per_trade']
+            self.trailing_stop_mult = saved_state['trailing_stop_mult']
+            self.take_profit_mult = saved_state['take_profit_mult']
+            
+            self.log("🔄 Estado anterior detectado", "info")
+            self.log(f"📊 Resumiendo: {self.strategy} en {self.symbol}", "success")
+            
+            self.is_running = False
+            return self.start()
+        
+        return False
     
     def trading_loop(self):
         """Loop principal"""
-        self.log("🤖 Bot iniciado (Delay 15min)", "success")
+        self.log("🤖 Bot iniciado (Alpaca PRO)", "success")
         
         while self.is_running:
             try:
                 clock = self.trading_client.get_clock()
                 if not clock.is_open:
                     self.log("⏰ Mercado cerrado", "warning")
-                    time.sleep(60)
+                    time.sleep(300)
                     continue
                 
                 df = self.get_historical_data(self.symbol, self.timeframe)
@@ -458,14 +583,13 @@ class AlpacaTradingBotDelayed:
                 
                 if self.current_position:
                     self.check_exit_conditions(current_price)
-                    self.update_trailing_stop(current_price, atr)
                 else:
                     signal = self.get_signal(df)
                     if signal != 0:
                         self.log(f"🎯 Señal: {'COMPRA' if signal == 1 else 'VENTA'}", "info")
                         self.open_position(signal, current_price, atr)
                 
-                time.sleep(30)
+                time.sleep(60)
                 
             except Exception as e:
                 self.log(f"❌ Error: {str(e)}", "error")
@@ -477,14 +601,28 @@ class AlpacaTradingBotDelayed:
         """Inicia bot"""
         if not self.is_running:
             self.is_running = True
-            thread = threading.Thread(target=self.trading_loop, daemon=True)
-            thread.start()
-            return True
+            self.save_state()
+            self.log("🚀 Iniciando bot...", "info")
+            self.log("💾 Estado guardado para Auto-Resume", "info")
+            
+            try:
+                thread = threading.Thread(target=self.trading_loop, daemon=True)
+                thread.start()
+                self.log("✅ Thread iniciado correctamente", "success")
+                return True
+            except Exception as e:
+                self.log(f"❌ Error: {str(e)}", "error")
+                self.is_running = False
+                self.db.clear_bot_state()
+                return False
         return False
     
     def stop(self):
         """Detiene bot"""
         self.is_running = False
+        self.db.clear_bot_state()
+        self.log("💾 Estado limpiado de DB", "info")
+        
         if self.current_position:
             price = self.get_current_price(self.symbol)
             if price:
@@ -495,42 +633,61 @@ class AlpacaTradingBotDelayed:
 # ===================================================================
 
 def main():
-    st.title("⏱️ Alpaca Bot - DELAY 15 MIN")
-    st.markdown("### Versión GRATUITA con datos retrasados")
+    st.title("🚀 Alpaca Bot PRO - ML + Auto-Resume")
+    st.markdown("### Machine Learning | SQLite Database | Delay 15min")
     
-    # Warning prominente
-    st.warning("""
-    ⏱️ **IMPORTANTE:** Este bot usa datos con **delay de 15 minutos** (gratuitos).
-    Las señales y trades se ejecutan con retraso. Ideal para backtesting y práctica.
-    """)
-    
+    # Inicializar bot con Auto-Resume
     if 'bot' not in st.session_state:
-        st.session_state.bot = None
-        st.session_state.bot_running = False
+        try:
+            api_key = st.secrets["alpaca"]["api_key"]
+            api_secret = st.secrets["alpaca"]["api_secret"]
+            st.session_state.bot = AlpacaBotPro(api_key, api_secret, paper=True)
+            
+            # Intentar auto-resume
+            if st.session_state.bot.load_and_resume():
+                st.success("🔄 Bot reanudado automáticamente!")
+                time.sleep(2)
+                st.rerun()
+        except:
+            st.session_state.bot = None
+    
+    bot = st.session_state.bot
     
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Configuración")
         
-        st.subheader("🔑 Alpaca API")
-        try:
-            api_key = st.secrets["alpaca"]["api_key"]
-            api_secret = st.secrets["alpaca"]["api_secret"]
-            st.success("✅ Keys desde secrets")
-        except:
-            api_key = st.text_input("API Key", type="password")
-            api_secret = st.text_input("API Secret", type="password")
-        
-        paper_trading = st.checkbox("Paper Trading", value=True)
+        st.info("🚀 **Features PRO:**\n\n"
+                "✅ Auto-Resume\n"
+                "✅ SQLite Database\n"
+                "✅ Machine Learning\n"
+                "✅ Position Sizing Adaptativo\n"
+                "✅ Análisis Avanzado")
         
         st.divider()
         
-        st.subheader("🎯 Estrategia")
-        strategy = st.selectbox(
-            "Estrategia",
-            ["ORB", "Pivot Hunter", "Gap Trading", "Quantum Shift", "TrendShift"]
-        )
+        # Mostrar estado guardado
+        if bot:
+            saved_state = bot.db.load_bot_state()
+            if saved_state and saved_state['is_running'] and not bot.is_running:
+                st.warning(f"""
+                🔄 **Estado anterior:**
+                - Símbolo: {saved_state['symbol']}
+                - Estrategia: {saved_state['strategy']}
+                
+                Recarga para reanudar.
+                """)
+            elif bot.is_running:
+                st.success(f"""
+                ✅ **Bot Activo:**
+                - {bot.strategy}
+                - {bot.symbol}
+                """)
         
+        st.divider()
+        
+        st.subheader("🎯 Configuración")
+        strategy = st.selectbox("Estrategia", ["ORB", "TrendShift", "Quantum Shift"])
         symbol = st.text_input("Símbolo", value="SPY")
         timeframe = st.selectbox("Timeframe", ["1Min", "5Min", "15Min", "1Hour"])
         
@@ -546,39 +703,34 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            if st.button("▶️ INICIAR", use_container_width=True, type="primary"):
-                if api_key and api_secret:
-                    st.session_state.bot = AlpacaTradingBotDelayed(api_key, api_secret, paper_trading)
-                    st.session_state.bot.strategy = strategy
-                    st.session_state.bot.symbol = symbol
-                    st.session_state.bot.timeframe = timeframe
-                    st.session_state.bot.risk_per_trade = risk_pct
-                    st.session_state.bot.trailing_stop_mult = trailing_mult
-                    st.session_state.bot.take_profit_mult = tp_mult
+            if st.button("▶️ INICIAR", use_container_width=True, type="primary", disabled=bot.is_running if bot else True):
+                if bot:
+                    bot.symbol = symbol
+                    bot.strategy = strategy
+                    bot.timeframe = timeframe
+                    bot.risk_per_trade = risk_pct
+                    bot.trailing_stop_mult = trailing_mult
+                    bot.take_profit_mult = tp_mult
                     
-                    if st.session_state.bot.start():
-                        st.session_state.bot_running = True
+                    if bot.start():
                         st.success("✅ Bot iniciado!")
+                        time.sleep(2)
                         st.rerun()
-                else:
-                    st.error("⚠️ Ingresa API keys")
         
         with col2:
-            if st.button("⏹️ DETENER", use_container_width=True):
-                if st.session_state.bot:
-                    st.session_state.bot.stop()
-                    st.session_state.bot_running = False
+            if st.button("⏹️ DETENER", use_container_width=True, disabled=not bot.is_running if bot else True):
+                if bot:
+                    bot.stop()
                     st.warning("🛑 Bot detenido")
+                    time.sleep(1)
                     st.rerun()
     
     # Main
-    if st.session_state.bot and st.session_state.bot_running:
-        bot = st.session_state.bot
-        
+    if bot and bot.is_running:
         st.markdown(f"""
-        <div style="background: linear-gradient(90deg, #ffa500 0%, #ff8c00 100%); 
+        <div style="background: linear-gradient(90deg, #00ff00 0%, #00cc00 100%); 
                     padding: 10px; border-radius: 10px; text-align: center; margin-bottom: 20px;">
-            <h2 style="color: white; margin: 0;">⏱️ BOT ACTIVO (Delay 15min) - {bot.strategy} en {bot.symbol}</h2>
+            <h2 style="color: white; margin: 0;">🟢 BOT ACTIVO - {bot.strategy} en {bot.symbol}</h2>
         </div>
         """, unsafe_allow_html=True)
         
@@ -587,21 +739,21 @@ def main():
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.metric("💵 Balance", f"${account['equity']:,.2f}")
+                st.metric("💵 Equity", f"${account['equity']:,.2f}")
             with col2:
-                pos = "LONG" if bot.current_position and bot.current_position['type'] == 'LONG' else "SHORT" if bot.current_position else "Sin posición"
+                pos = bot.current_position['type'] if bot.current_position else "Sin posición"
                 st.metric("📊 Posición", pos)
             with col3:
-                st.metric("📈 Trades", len(bot.trades_history))
+                stats = bot.db.get_stats()
+                total = stats['total_trades'] if stats else 0
+                st.metric("📈 Trades", total)
             with col4:
-                if bot.trades_history:
-                    wins = len([t for t in bot.trades_history if t['profit'] > 0])
-                    wr = (wins / len(bot.trades_history) * 100)
-                    st.metric("🎯 Win Rate", f"{wr:.1f}%")
+                if stats:
+                    st.metric("🎯 Win Rate", f"{stats['win_rate']:.1f}%")
                 else:
                     st.metric("🎯 Win Rate", "0%")
         
-        tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "📜 Logs", "💼 Trades"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📜 Logs", "💼 Trades DB", "📉 Análisis"])
         
         with tab1:
             if len(bot.equity_history) > 1:
@@ -610,104 +762,5 @@ def main():
                     y=list(bot.equity_history),
                     mode='lines',
                     fill='tozeroy',
-                    line=dict(color='#ffa500', width=2)
+                    line=dict(color='#00ff00', width=2)
                 ))
-                fig.update_layout(height=300, template="plotly_dark", title="Equity Curve")
-                st.plotly_chart(fig, use_container_width=True)
-            
-            if bot.current_position:
-                st.subheader("📍 Posición Actual")
-                pos = bot.current_position
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.info(f"""
-                    **Tipo:** {pos['type']}  
-                    **Entrada:** ${pos['entry_price']:.2f}  
-                    **Cantidad:** {pos['qty']}
-                    """)
-                
-                with col2:
-                    cp = bot.get_current_price(bot.symbol)
-                    if cp:
-                        if pos['type'] == 'LONG':
-                            pnl = (cp - pos['entry_price']) * pos['qty']
-                        else:
-                            pnl = (pos['entry_price'] - cp) * pos['qty']
-                        
-                        color = "green" if pnl > 0 else "red"
-                        st.markdown(f"""
-                        **Precio:** ${cp:.2f}  
-                        **P/L:** <span style="color: {color};">${pnl:.2f}</span>
-                        """, unsafe_allow_html=True)
-                
-                with col3:
-                    st.warning(f"""
-                    **Stop:** ${pos['stop_loss']:.2f}  
-                    **TP:** ${pos['take_profit']:.2f}
-                    """)
-        
-        with tab2:
-            st.subheader("📜 Logs")
-            for log in reversed(list(bot.logs)):
-                color = {'success': 'green', 'error': 'red', 'warning': 'orange', 'info': 'blue'}.get(log['level'], 'white')
-                st.markdown(f"""
-                <div style="background: rgba(0,0,0,0.3); padding: 8px; margin: 4px 0; border-radius: 5px; border-left: 3px solid {color};">
-                    [{log['time']}] {log['message']}
-                </div>
-                """, unsafe_allow_html=True)
-        
-        with tab3:
-            st.subheader("💼 Historial")
-            if bot.trades_history:
-                df = pd.DataFrame(bot.trades_history)
-                total = df['profit'].sum()
-                avg = df['profit'].mean()
-                wins = len(df[df['profit'] > 0])
-                losses = len(df[df['profit'] < 0])
-                
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Total P/L", f"${total:.2f}")
-                with col2:
-                    st.metric("Avg P/L", f"${avg:.2f}")
-                with col3:
-                    st.metric("✅ Wins", wins)
-                with col4:
-                    st.metric("❌ Losses", losses)
-                
-                st.dataframe(df, use_container_width=True)
-            else:
-                st.info("No hay trades")
-        
-        time.sleep(5)
-        st.rerun()
-    
-    else:
-        st.info("""
-        ### ⏱️ Bot Alpaca con Datos Gratuitos (Delay 15min)
-        
-        **Características:**
-        - ✅ Datos completamente GRATUITOS
-        - ⏱️ Delay de 15 minutos (suficiente para práctica)
-        - ✅ Todas las estrategias funcionan
-        - ✅ Paper trading ilimitado
-        - ✅ Sin costo de suscripción
-        
-        **Ideal para:**
-        - 🎓 Aprender y practicar
-        - 📊 Backtesting de estrategias
-        - 🧪 Probar el bot sin riesgo
-        - 📈 Ver resultados con datos reales (retrasados)
-        
-        **Para comenzar:**
-        1. Ingresa tus API keys de Alpaca
-        2. Selecciona estrategia (ORB recomendada)
-        3. Click ▶️ INICIAR
-        
-        **Nota:** Para datos en tiempo real necesitas suscripción de Alpaca (~$9/mes)
-        """)
-
-if __name__ == "__main__":
-    main()
